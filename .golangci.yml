@@ -1,0 +1,47 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    # Bug detection
+    - bodyclose
+    - durationcheck
+    - errcheck
+    - govet
+    - staticcheck
+
+    # Code quality
+    - ineffassign
+    - unused
+    - unconvert
+    - unparam
+
+    # Style
+    - misspell
+
+    # Security
+    - gosec
+
+  exclusions:
+    presets:
+      - std-error-handling
+      - common-false-positives
+    rules:
+      # Ignore errcheck/bodyclose/gosec in test files
+      - path: _test\.go
+        linters:
+          - errcheck
+          - bodyclose
+          - gosec
+      # Ignore gosec in example files (demonstration code)
+      - path: example/
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
