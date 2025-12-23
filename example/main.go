@@ -157,17 +157,31 @@ func main() {
 		case <-ticker.C:
 			batch++
 			state := client.GetState(healthURL)
-			concurrency := state.CurrentConcurrency
-			if concurrency == 0 {
-				concurrency = 5
+
+			// Get available slots from the semaphore, not just the configured concurrency.
+			// This is important: if capacity drops mid-run, we don't wastefully spawn
+			// goroutines that will just block waiting for slots. The transport's semaphore
+			// is the source of truth for actual available capacity.
+			stats := client.GetStats()
+			var available int
+			for _, s := range stats {
+				available = s.Available
+				break // We only have one host in this example
+			}
+			if available == 0 {
+				// No slots available yet (first request) or all in use
+				available = state.CurrentConcurrency
+				if available == 0 {
+					available = 5
+				}
 			}
 
-			// Make concurrent requests in this batch
+			// Make concurrent requests - only spawn as many as we have slots for
 			var wg sync.WaitGroup
 			var success, fail int64
 
 			batchStart := time.Now()
-			for i := 0; i < concurrency; i++ {
+			for i := 0; i < available; i++ {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
@@ -183,7 +197,7 @@ func main() {
 			wg.Wait()
 			batchDuration := time.Since(batchStart)
 
-			totalRequests += int64(concurrency)
+			totalRequests += int64(available)
 			totalSuccess += success
 			totalFail += fail
 
@@ -194,7 +208,7 @@ func main() {
 			}
 
 			// Color-coded output based on success rate
-			successRate := float64(success) / float64(concurrency) * 100
+			successRate := float64(success) / float64(available) * 100
 			var indicator string
 			switch {
 			case successRate == 100:
@@ -208,7 +222,7 @@ func main() {
 			}
 
 			fmt.Printf("  %s %3d │ %4d │ %4d │ %4d │ %9d │ %7d │ %s  (%v)\n",
-				indicator, batch, concurrency, success, fail, state.SuggestedConcurrency, state.CurrentConcurrency, statusStr, batchDuration.Round(time.Millisecond))
+				indicator, batch, available, success, fail, state.SuggestedConcurrency, state.CurrentConcurrency, statusStr, batchDuration.Round(time.Millisecond))
 		}
 	}
 
