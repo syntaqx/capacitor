@@ -2,6 +2,7 @@ package capacitor
 
 import (
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -56,6 +57,14 @@ type Config struct {
 	// Transport is the underlying HTTP transport to use.
 	// If nil, http.DefaultTransport is used.
 	Transport http.RoundTripper
+
+	// KeyFunc returns the key used for concurrency grouping.
+	// By default, requests are grouped by scheme://host:port.
+	// Use this to implement path-based or custom grouping.
+	// For example, to group by first path segment:
+	//   KeyFunc: capacitor.PathPrefixKeyFunc(1)
+	// If nil, HostKeyFunc is used.
+	KeyFunc func(u *url.URL) string
 }
 
 // DefaultConfig returns the default configuration.

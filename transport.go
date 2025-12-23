@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 )
 
@@ -230,12 +231,13 @@ func (t *Transport) addUserAgent(req *http.Request) {
 	}
 }
 
-// hostKey returns a unique key for a host.
+// hostKey returns the key used for concurrency grouping.
+// If KeyFunc is configured, it is used; otherwise defaults to scheme://host.
 func (t *Transport) hostKey(u *url.URL) string {
-	if u.Port() != "" {
-		return u.Scheme + "://" + u.Host
+	if t.config.KeyFunc != nil {
+		return t.config.KeyFunc(u)
 	}
-	return u.Scheme + "://" + u.Hostname()
+	return HostKeyFunc(u)
 }
 
 // GetState returns the current state for a host, or nil if unknown.
@@ -292,4 +294,63 @@ var capacityHeaders = []string{
 	"X-Capacity-Worker-Load-Factor",
 	"X-Capacity-Latency-P99",
 	"X-Capacity-Latency-Health",
+}
+
+// HostKeyFunc returns a key based on scheme://host:port only.
+// This is the default behavior and groups all paths on the same host together.
+func HostKeyFunc(u *url.URL) string {
+	if u.Port() != "" {
+		return u.Scheme + "://" + u.Host
+	}
+	return u.Scheme + "://" + u.Hostname()
+}
+
+// PathPrefixKeyFunc returns a KeyFunc that groups requests by the first n
+// path segments. This is useful when different path prefixes map to
+// different backend deployments.
+//
+// For example, with n=1:
+//   - api.example.com/admin/users -> https://api.example.com/admin
+//   - api.example.com/admin/config -> https://api.example.com/admin
+//   - api.example.com/sales/orders -> https://api.example.com/sales
+//
+// With n=2:
+//   - api.example.com/v1/admin/users -> https://api.example.com/v1/admin
+//   - api.example.com/v1/sales/orders -> https://api.example.com/v1/sales
+func PathPrefixKeyFunc(n int) func(u *url.URL) string {
+	return func(u *url.URL) string {
+		base := HostKeyFunc(u)
+		if n <= 0 {
+			return base
+		}
+
+		path := u.Path
+		if path == "" || path == "/" {
+			return base
+		}
+
+		// Trim leading slash and split
+		if path[0] == '/' {
+			path = path[1:]
+		}
+
+		segments := strings.SplitN(path, "/", n+1)
+		if len(segments) == 0 {
+			return base
+		}
+
+		// Take up to n segments
+		count := n
+		if len(segments) < count {
+			count = len(segments)
+		}
+
+		return base + "/" + strings.Join(segments[:count], "/")
+	}
+}
+
+// ExactPathKeyFunc returns a KeyFunc that groups requests by the exact path.
+// This gives the most granular control but may create many concurrency pools.
+func ExactPathKeyFunc(u *url.URL) string {
+	return HostKeyFunc(u) + u.Path
 }
