@@ -2,6 +2,7 @@ package capacitor
 
 import (
 	"net/http"
+	"net/url"
 	"sort"
 	"time"
 )
@@ -86,6 +87,20 @@ func (b *Builder) OnStateChange(fn func(host string, state *State)) *Builder {
 // OnSignal registers a callback for detected signals.
 func (b *Builder) OnSignal(fn func(host string, signal *Signal)) *Builder {
 	b.config.OnSignal = fn
+	return b
+}
+
+// WithKeyFunc sets a custom function for concurrency pool grouping.
+// By default, requests are grouped by scheme://host:port.
+// Use this to implement path-based or custom grouping strategies.
+//
+// Example - group by first path segment:
+//
+//	client := capacitor.Wrap(nil).
+//	    WithKeyFunc(capacitor.PathPrefixKeyFunc(1)).
+//	    Build()
+func (b *Builder) WithKeyFunc(fn func(u *url.URL) string) *Builder {
+	b.config.KeyFunc = fn
 	return b
 }
 
