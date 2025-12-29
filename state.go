@@ -48,6 +48,12 @@ type State struct {
 	LastUpdated        time.Time
 	CurrentConcurrency int
 	BlockedUntil       time.Time
+
+	// Clamped indicates if CurrentConcurrency was adjusted from the
+	// SuggestedConcurrency due to MinConcurrency or MaxConcurrency constraints.
+	// This helps users detect when the backend suggests a concurrency outside
+	// their configured bounds.
+	Clamped bool
 }
 
 // NewState creates a new state with initial concurrency.
@@ -80,7 +86,10 @@ func (s *State) Update(headers map[string]string) {
 		s.ClusterMaxConcurrency, _ = strconv.Atoi(v)
 	}
 	if v, ok := headers["X-Capacity-Suggested-Concurrency"]; ok {
-		s.SuggestedConcurrency, _ = strconv.Atoi(v)
+		// Only store non-negative values; negative is invalid
+		if suggested, _ := strconv.Atoi(v); suggested >= 0 {
+			s.SuggestedConcurrency = suggested
+		}
 	}
 	if v, ok := headers["X-Capacity-State-Age"]; ok {
 		s.StateAge, _ = strconv.Atoi(v)
@@ -129,6 +138,13 @@ func (s *State) SetCurrentConcurrency(n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.CurrentConcurrency = n
+}
+
+// SetClamped sets whether the concurrency was clamped by config limits.
+func (s *State) SetClamped(clamped bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Clamped = clamped
 }
 
 // GetCurrentConcurrency returns the current concurrency limit.
@@ -187,5 +203,6 @@ func (s *State) Clone() *State {
 		LastUpdated:           s.LastUpdated,
 		CurrentConcurrency:    s.CurrentConcurrency,
 		BlockedUntil:          s.BlockedUntil,
+		Clamped:               s.Clamped,
 	}
 }
