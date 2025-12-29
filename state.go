@@ -49,9 +49,10 @@ type State struct {
 	CurrentConcurrency int
 	BlockedUntil       time.Time
 
-	// Clamped indicates if CurrentConcurrency was clamped to MinConcurrency
-	// because SuggestedConcurrency was below the configured minimum.
-	// This helps users detect when backend suggests throttling below their floor.
+	// Clamped indicates if CurrentConcurrency was adjusted from the
+	// SuggestedConcurrency due to MinConcurrency or MaxConcurrency constraints.
+	// This helps users detect when the backend suggests a concurrency outside
+	// their configured bounds.
 	Clamped bool
 }
 
