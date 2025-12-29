@@ -37,3 +37,7 @@ jobs:
         run: go mod download
       - name: Test
         run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
