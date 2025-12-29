@@ -86,9 +86,15 @@ func (s *State) Update(headers map[string]string) {
 		s.ClusterMaxConcurrency, _ = strconv.Atoi(v)
 	}
 	if v, ok := headers["X-Capacity-Suggested-Concurrency"]; ok {
-		// Only store non-negative values; negative is invalid
-		if suggested, _ := strconv.Atoi(v); suggested >= 0 {
-			s.SuggestedConcurrency = suggested
+		// Only store non-negative values; negative or invalid values reset to 0
+		if suggested, err := strconv.Atoi(v); err == nil {
+			if suggested >= 0 {
+				s.SuggestedConcurrency = suggested
+			} else {
+				s.SuggestedConcurrency = 0
+			}
+		} else {
+			s.SuggestedConcurrency = 0
 		}
 	}
 	if v, ok := headers["X-Capacity-State-Age"]; ok {
