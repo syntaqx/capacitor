@@ -143,8 +143,11 @@ func (t *Transport) updateState(host string, hs *hostState, resp *http.Response)
 	}
 
 	// Update concurrency if suggested
-	if action.AdjustConcurrency && action.NewConcurrency > 0 {
+	if action.AdjustConcurrency {
 		suggested := action.NewConcurrency
+		original := suggested
+		// Always enforce MinConcurrency as absolute floor, even if backend suggests 0
+		// This prevents complete blocking while respecting backend's signal to throttle
 		if suggested < t.config.MinConcurrency {
 			suggested = t.config.MinConcurrency
 		}
@@ -156,6 +159,9 @@ func (t *Transport) updateState(host string, hs *hostState, resp *http.Response)
 		if suggested != current {
 			hs.state.SetCurrentConcurrency(suggested)
 			hs.semaphore.Resize(suggested)
+
+			// Mark as clamped if we adjusted the suggestion
+			hs.state.SetClamped(original != suggested)
 
 			if t.config.OnStateChange != nil {
 				t.config.OnStateChange(host, hs.state.Clone())
@@ -194,7 +200,7 @@ func (t *Transport) processSignals(signals []*Signal) *SignalAction {
 
 		case SignalTypeRateLimit, SignalTypeBackoff:
 			// Use the most conservative (lowest) suggested concurrency
-			if signal.SuggestedConcurrency > 0 {
+			if signal.SuggestedConcurrency >= 0 {
 				if !action.AdjustConcurrency || signal.SuggestedConcurrency < action.NewConcurrency {
 					action.AdjustConcurrency = true
 					action.NewConcurrency = signal.SuggestedConcurrency
@@ -206,7 +212,7 @@ func (t *Transport) processSignals(signals []*Signal) *SignalAction {
 
 		case SignalTypeCapacity:
 			// Capacity signals suggest concurrency adjustments
-			if signal.SuggestedConcurrency > 0 {
+			if signal.SuggestedConcurrency >= 0 {
 				if !action.AdjustConcurrency {
 					action.AdjustConcurrency = true
 					action.NewConcurrency = signal.SuggestedConcurrency
