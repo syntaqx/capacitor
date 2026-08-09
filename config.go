@@ -14,7 +14,7 @@ type Config struct {
 
 	// InitialConcurrency is the starting concurrency limit before
 	// receiving any capacity signals from the server.
-	// Default: 10
+	// Default: 100
 	InitialConcurrency int
 
 	// MaxConcurrency is the absolute maximum concurrent requests allowed,
@@ -45,13 +45,13 @@ type Config struct {
 	OnSignal func(host string, signal *Signal)
 
 	// SignalHandlers is the list of handlers to process responses.
-	// If nil, DefaultSignalHandlers() is used.
-	// Handlers are processed in priority order.
+	// If nil, no handlers run and the client behaves as a passthrough
+	// (no throttling). Handlers are processed in priority order.
 	SignalHandlers []SignalHandler
 
 	// EnableGOAWAYHandling enables tracking of HTTP/2 GOAWAY frames.
-	// When enabled, GOAWAY frames trigger automatic backoff.
-	// Default: true
+	// When enabled, a GOAWAY on a request triggers a short backoff for the host.
+	// Default: false
 	EnableGOAWAYHandling bool
 
 	// Transport is the underlying HTTP transport to use.
@@ -65,6 +65,20 @@ type Config struct {
 	//   KeyFunc: capacitor.PathPrefixKeyFunc(1)
 	// If nil, HostKeyFunc is used.
 	KeyFunc func(u *url.URL) string
+
+	// MaxTrackedHosts bounds the number of per-host pools kept in memory.
+	// When adding a host would exceed this limit, idle hosts that have been
+	// unused for longer than HostIdleTTL are evicted. Active hosts (with
+	// in-flight or queued requests, or an active block window) are never
+	// evicted. Zero means unlimited (no eviction).
+	// Default: 0 (unlimited)
+	MaxTrackedHosts int
+
+	// HostIdleTTL is how long a host must be idle before it becomes eligible
+	// for eviction once MaxTrackedHosts is reached. Only used when
+	// MaxTrackedHosts > 0.
+	// Default: 5m
+	HostIdleTTL time.Duration
 }
 
 // DefaultConfig returns the default configuration.
@@ -105,6 +119,21 @@ func (c *Config) withDefaults() *Config {
 	}
 	if cfg.StateExpiry <= 0 {
 		cfg.StateExpiry = 30 * time.Second
+	}
+	if cfg.MaxTrackedHosts > 0 && cfg.HostIdleTTL <= 0 {
+		cfg.HostIdleTTL = 5 * time.Minute
+	}
+
+	// Keep the bounds consistent and start within them, so MaxConcurrency is an
+	// absolute ceiling even before any signal arrives.
+	if cfg.MinConcurrency > cfg.MaxConcurrency {
+		cfg.MinConcurrency = cfg.MaxConcurrency
+	}
+	if cfg.InitialConcurrency < cfg.MinConcurrency {
+		cfg.InitialConcurrency = cfg.MinConcurrency
+	}
+	if cfg.InitialConcurrency > cfg.MaxConcurrency {
+		cfg.InitialConcurrency = cfg.MaxConcurrency
 	}
 	// Don't set default handlers - nil means passthrough
 

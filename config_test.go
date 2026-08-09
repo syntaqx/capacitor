@@ -107,6 +107,26 @@ func TestConfig_withDefaults_NegativeValues(t *testing.T) {
 	}
 }
 
+func TestConfig_withDefaults_ClampsInitialToBounds(t *testing.T) {
+	// InitialConcurrency above MaxConcurrency must be capped so Max is absolute.
+	cfg := (&Config{InitialConcurrency: 500, MinConcurrency: 1, MaxConcurrency: 10}).withDefaults()
+	if cfg.InitialConcurrency != 10 {
+		t.Errorf("InitialConcurrency = %d, want 10 (capped to Max)", cfg.InitialConcurrency)
+	}
+
+	// InitialConcurrency below MinConcurrency must be raised.
+	cfg = (&Config{InitialConcurrency: 2, MinConcurrency: 5, MaxConcurrency: 20}).withDefaults()
+	if cfg.InitialConcurrency != 5 {
+		t.Errorf("InitialConcurrency = %d, want 5 (raised to Min)", cfg.InitialConcurrency)
+	}
+
+	// Inverted bounds are reconciled with Max as the ceiling.
+	cfg = (&Config{InitialConcurrency: 50, MinConcurrency: 50, MaxConcurrency: 10}).withDefaults()
+	if cfg.MinConcurrency != 10 || cfg.InitialConcurrency != 10 {
+		t.Errorf("inverted bounds: min=%d initial=%d, want 10/10", cfg.MinConcurrency, cfg.InitialConcurrency)
+	}
+}
+
 func TestConfig_withDefaults_CustomValues(t *testing.T) {
 	customTransport := &http.Transport{}
 	cfg := &Config{

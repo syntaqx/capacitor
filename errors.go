@@ -1,8 +1,13 @@
 package capacitor
 
 import (
+	"errors"
 	"fmt"
 )
+
+// ErrBlocked is the underlying error when a request is refused because the host
+// is within a server-signalled block window (e.g. after a 429 with Retry-After).
+var ErrBlocked = errors.New("host is temporarily blocked")
 
 // CapacityError represents an error related to capacity limiting.
 type CapacityError struct {
@@ -24,8 +29,10 @@ func (e *CapacityError) Unwrap() error {
 	return e.Err
 }
 
-// IsCapacityError returns true if the error is a capacity-related error.
+// IsCapacityError returns true if err, or any error it wraps, is a
+// *CapacityError. This unwraps errors returned by http.Client, which wraps
+// transport errors in *url.Error.
 func IsCapacityError(err error) bool {
-	_, ok := err.(*CapacityError)
-	return ok
+	var capErr *CapacityError
+	return errors.As(err, &capErr)
 }

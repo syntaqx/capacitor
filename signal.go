@@ -15,7 +15,8 @@ type Signal struct {
 	// Type categorizes the signal
 	Type SignalType
 
-	// SuggestedConcurrency is the recommended concurrency, if applicable
+	// SuggestedConcurrency is the recommended concurrency, if applicable.
+	// A value < 0 means the handler made no suggestion.
 	SuggestedConcurrency int
 
 	// RetryAfter indicates when to retry, if applicable
@@ -70,22 +71,15 @@ type SignalHandler interface {
 	Process(resp *http.Response) *Signal
 }
 
-// SignalAction represents what action to take based on signals.
-type SignalAction struct {
-	// AdjustConcurrency indicates concurrency should be changed
+// signalAction is the aggregate decision derived from one response's signals.
+type signalAction struct {
+	// AdjustConcurrency reports that concurrency should change to NewConcurrency.
 	AdjustConcurrency bool
 	NewConcurrency    int
 
-	// Block indicates requests should be blocked
+	// Block reports that requests should be paused until BlockUntil.
 	Block      bool
 	BlockUntil time.Time
-	RetryAfter time.Duration
-
-	// Backoff indicates exponential backoff should be used
-	Backoff bool
-
-	// Signals contains all detected signals
-	Signals []*Signal
 }
 
 // DefaultSignalHandlers returns the default set of signal handlers.
@@ -110,8 +104,9 @@ func (h *HTTPStatusHandler) Priority() int { return 10 }
 
 func (h *HTTPStatusHandler) Process(resp *http.Response) *Signal {
 	signal := &Signal{
-		Source: "http",
-		Raw:    make(map[string]string),
+		Source:               "http",
+		SuggestedConcurrency: -1,
+		Raw:                  make(map[string]string),
 	}
 
 	// Check for rate limit status codes
@@ -172,8 +167,9 @@ func (h *RateLimitHandler) Priority() int { return 20 }
 
 func (h *RateLimitHandler) Process(resp *http.Response) *Signal {
 	signal := &Signal{
-		Source: "ratelimit",
-		Raw:    make(map[string]string),
+		Source:               "ratelimit",
+		SuggestedConcurrency: -1,
+		Raw:                  make(map[string]string),
 	}
 
 	// Try each header variant - http.Header.Get is case-insensitive
@@ -193,11 +189,15 @@ func (h *RateLimitHandler) Process(resp *http.Response) *Signal {
 		signal.Remaining, _ = strconv.Atoi(remaining)
 	}
 
-	// Check for reset header
+	// Check for reset header. The reset only tells us when the quota window
+	// rolls over; it is not by itself a signal to stop. We turn it into a block
+	// window only when the quota is actually exhausted (below).
+	var resetBlockUntil time.Time
+	var resetRetryAfter time.Duration
 	reset := h.getFirstHeader(resp, "X-RateLimit-Reset", "RateLimit-Reset", "CF-RateLimit-Reset")
 	if reset != "" {
 		signal.Raw["Reset"] = reset
-		signal.BlockUntil, signal.RetryAfter = parseResetValue(reset)
+		resetBlockUntil, resetRetryAfter = parseResetValue(reset)
 	}
 
 	// Check for additional headers (informational)
@@ -218,9 +218,13 @@ func (h *RateLimitHandler) Process(resp *http.Response) *Signal {
 
 	// Determine signal type based on remaining quota
 	if signal.Remaining <= 0 && signal.Limit > 0 {
+		// Quota exhausted: block until the window resets.
 		signal.Type = SignalTypeBlock
 		signal.Message = "Rate limit exceeded"
+		signal.BlockUntil = resetBlockUntil
+		signal.RetryAfter = resetRetryAfter
 	} else if signal.Limit > 0 && signal.Remaining < signal.Limit/10 {
+		// Quota running low: throttle concurrency, but keep sending.
 		signal.Type = SignalTypeRateLimit
 		signal.Message = "Rate limit approaching"
 		signal.SuggestedConcurrency = max(1, signal.Remaining*10/signal.Limit)
@@ -254,9 +258,10 @@ func (h *CapacityHandler) Priority() int { return 100 }
 
 func (h *CapacityHandler) Process(resp *http.Response) *Signal {
 	signal := &Signal{
-		Source: "capacity",
-		Type:   SignalTypeCapacity,
-		Raw:    make(map[string]string),
+		Source:               "capacity",
+		Type:                 SignalTypeCapacity,
+		SuggestedConcurrency: -1,
+		Raw:                  make(map[string]string),
 	}
 
 	hasCapacityHeaders := false
@@ -335,6 +340,7 @@ func (h *GOAWAYHandler) ProcessError(err error) *Signal {
 			Type:       SignalTypeBackoff,
 			Message:    "Connection reset",
 			RetryAfter: 2 * time.Second,
+			BlockUntil: time.Now().Add(2 * time.Second),
 		}
 	}
 
@@ -353,8 +359,8 @@ func parseRetryAfter(value string) time.Duration {
 		return time.Duration(seconds) * time.Second
 	}
 
-	// Try parsing as HTTP-date
-	if t, err := time.Parse(time.RFC1123, value); err == nil {
+	// Try parsing as an HTTP-date (handles RFC1123, RFC850, and ANSI C formats)
+	if t, err := http.ParseTime(value); err == nil {
 		return time.Until(t)
 	}
 
@@ -395,11 +401,4 @@ func parseRateLimitValue(v string) int {
 	}
 	n, _ := strconv.Atoi(v)
 	return n
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

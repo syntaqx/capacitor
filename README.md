@@ -108,8 +108,8 @@ For application-level capacity signaling, enable `WithCapacityHeaders()`:
 
 ```go
 client := capacitor.Wrap(myHTTPClient).
-    WithConcurrency(10, 1, 100). // initial, min, max
-    WithTimeout(30 * time.Second).
+    WithConcurrency(10, 1, 100). // initial, minimum, maximum
+    WithAcquireTimeout(30 * time.Second).
     WithRateLimitHeaders().
     OnStateChange(func(host string, state *capacitor.State) {
         log.Printf("Host %s: concurrency now %d", host, state.CurrentConcurrency)
@@ -120,15 +120,30 @@ client := capacitor.Wrap(myHTTPClient).
     Build()
 ```
 
+### Bounding memory for many hosts
+
+Each distinct host gets its own concurrency pool. Long-running clients that
+touch many hosts (crawlers, fan-out services) can cap how many pools are kept in
+memory. Once the limit is reached, only idle hosts (no in-flight or queued
+requests, not blocked, unused beyond the idle TTL) are evicted:
+
+```go
+client := capacitor.Wrap(nil).
+    WithRateLimitHeaders().
+    WithMaxTrackedHosts(10_000).      // cap tracked hosts (0 = unlimited)
+    WithHostIdleTTL(5 * time.Minute). // how long a host must be idle first
+    Build()
+```
+
 ## Inspecting State
 
 ```go
 // Get state for a specific host
-state := client.GetState("https://api.example.com")
+state := client.State("https://api.example.com")
 fmt.Printf("Status: %s, Concurrency: %d\n", state.Status, state.CurrentConcurrency)
 
 // Get stats for all known hosts
-for host, stats := range client.GetStats() {
+for host, stats := range client.Stats() {
     fmt.Printf("%s: %d in-use, %d available, %d waiting\n",
         host, stats.InUse, stats.Available, stats.Waiting)
 }
@@ -149,6 +164,21 @@ if err != nil {
     }
 }
 ```
+
+After a `429`, `503`, or `Retry-After` response, the client refuses further
+requests to that host until the retry window elapses. Those requests fail fast
+with a `*capacitor.CapacityError` (`Op: "blocked"`) that wraps
+`capacitor.ErrBlocked`, so no traffic reaches an already-overloaded server:
+
+```go
+if errors.Is(err, capacitor.ErrBlocked) {
+    // Host is in a server-signalled cool-down window; try again later.
+}
+```
+
+`capacitor.IsCapacityError(err)` unwraps the `*url.Error` that `http.Client`
+adds, so it works on errors returned directly from `Get`/`Do`.
+
 
 ## Server Implementation
 
@@ -171,6 +201,36 @@ X-Capacity-Worker-Load-Factor: 0.45
 - **Web Scrapers** - Respect target server capacity
 - **Microservices** - Prevent cascading failures during traffic spikes
 - **Batch Processing** - Maximize throughput without overwhelming backends
+
+## Demo
+
+The [`example/`](example) directory contains a self-contained demo: an adaptive
+client driving load against a fake backend that advertises its (changing)
+capacity through `X-Capacity-*` and `X-RateLimit-*` headers.
+
+Run both sides together and watch `CLIENT-CONC` track the server's `SUGGEST`:
+
+```bash
+go run ./example
+```
+
+Run a naive client that ignores the signals to see the difference: it hammers
+the backend into shedding most of its traffic:
+
+```bash
+go run ./example -baseline
+```
+
+In a representative run the adaptive client serves ~95% of requests while the
+backend sheds ~2%; the naive client's success rate collapses to ~25% with the
+backend shedding ~75%.
+
+Or run the two sides separately:
+
+```bash
+go run ./example -mode=server -addr=:8080
+go run ./example -mode=client -url=http://localhost:8080
+```
 
 ## Testing
 

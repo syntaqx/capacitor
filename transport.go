@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Transport is an http.RoundTripper that enforces capacity limits
@@ -15,12 +16,16 @@ import (
 type Transport struct {
 	config *Config
 	base   http.RoundTripper
+	goaway *GOAWAYHandler
 
 	mu    sync.RWMutex
 	hosts map[string]*hostState
 }
 
 type hostState struct {
+	// mu serializes signal-driven adjustments so the read-modify-write across
+	// state and semaphore stays atomic under concurrent responses.
+	mu        sync.Mutex
 	state     *State
 	semaphore *Semaphore
 }
@@ -34,11 +39,15 @@ func NewTransport(config *Config) *Transport {
 		base = http.DefaultTransport
 	}
 
-	return &Transport{
+	t := &Transport{
 		config: cfg,
 		base:   base,
 		hosts:  make(map[string]*hostState),
 	}
+	if cfg.EnableGOAWAYHandling {
+		t.goaway = &GOAWAYHandler{}
+	}
+	return t
 }
 
 // RoundTrip implements http.RoundTripper.
@@ -46,8 +55,22 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	host := t.hostKey(req.URL)
 	hs := t.getOrCreateHostState(host)
 
-	// Add user agent if configured
-	t.addUserAgent(req)
+	// Reset throttling if the cached state has gone stale.
+	t.expireStaleState(host, hs)
+
+	// Refuse the request while the host is in a server-signalled block window.
+	if hs.state.IsBlocked() {
+		return nil, &CapacityError{
+			Op:    "blocked",
+			Host:  host,
+			Err:   ErrBlocked,
+			State: hs.state.clone(),
+		}
+	}
+
+	// Add the user agent without mutating the caller's request. The
+	// http.RoundTripper contract forbids modifying the incoming request.
+	req = t.withUserAgent(req)
 
 	// Create a context with timeout for acquiring the semaphore
 	ctx := req.Context()
@@ -63,7 +86,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 			Op:    "acquire",
 			Host:  host,
 			Err:   err,
-			State: hs.state.Clone(),
+			State: hs.state.clone(),
 		}
 	}
 
@@ -73,6 +96,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Make the actual request
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
+		t.handleTransportError(host, hs, err)
 		return nil, err
 	}
 
@@ -80,6 +104,71 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.updateState(host, hs, resp)
 
 	return resp, nil
+}
+
+// expireStaleState resets a host back to its initial concurrency once its
+// cached state has not been refreshed within StateExpiry. This prevents a host
+// from staying throttled indefinitely after the server has recovered.
+func (t *Transport) expireStaleState(host string, hs *hostState) {
+	if t.config.StateExpiry <= 0 || !hs.state.IsStale(t.config.StateExpiry) {
+		return
+	}
+
+	// An active block window is authoritative and expires on its own schedule;
+	// don't let stale-state recovery cut it short.
+	if hs.state.IsBlocked() {
+		return
+	}
+
+	if t.adjustConcurrency(hs, t.config.InitialConcurrency) {
+		hs.state.touch()
+		if t.config.OnStateChange != nil {
+			t.config.OnStateChange(host, hs.state.clone())
+		}
+	}
+}
+
+// adjustConcurrency clamps target to the configured bounds and atomically
+// applies it to the host's state and semaphore. It reports whether the value
+// changed so the caller can fire OnStateChange outside the lock.
+func (t *Transport) adjustConcurrency(hs *hostState, target int) bool {
+	clamped := target
+	if clamped < t.config.MinConcurrency {
+		clamped = t.config.MinConcurrency
+	}
+	if clamped > t.config.MaxConcurrency {
+		clamped = t.config.MaxConcurrency
+	}
+
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	if hs.state.getCurrentConcurrency() == clamped {
+		return false
+	}
+	hs.state.setCurrentConcurrency(clamped)
+	hs.semaphore.Resize(clamped)
+	hs.state.setClamped(target != clamped)
+	return true
+}
+
+// handleTransportError inspects transport-level errors for GOAWAY or connection
+// reset signals and applies backoff to the host when GOAWAY handling is enabled.
+func (t *Transport) handleTransportError(host string, hs *hostState, err error) {
+	if t.goaway == nil {
+		return
+	}
+	signal := t.goaway.ProcessError(err)
+	if signal == nil {
+		return
+	}
+
+	if t.config.OnSignal != nil {
+		t.config.OnSignal(host, signal)
+	}
+	if !signal.BlockUntil.IsZero() {
+		hs.state.setBlockedUntil(signal.BlockUntil)
+	}
+	hs.state.touch()
 }
 
 // getOrCreateHostState returns the state for a host, creating it if needed.
@@ -100,8 +189,13 @@ func (t *Transport) getOrCreateHostState(host string) *hostState {
 		return hs
 	}
 
+	// Bound memory by evicting idle hosts before growing past the limit.
+	if t.config.MaxTrackedHosts > 0 && len(t.hosts) >= t.config.MaxTrackedHosts {
+		t.evictIdleLocked()
+	}
+
 	hs = &hostState{
-		state:     NewState(t.config.InitialConcurrency),
+		state:     newState(t.config.InitialConcurrency),
 		semaphore: NewSemaphore(t.config.InitialConcurrency),
 	}
 	t.hosts[host] = hs
@@ -109,8 +203,28 @@ func (t *Transport) getOrCreateHostState(host string) *hostState {
 	return hs
 }
 
+// evictIdleLocked removes hosts that have no in-flight or queued requests, are
+// not in a block window, and have been idle beyond HostIdleTTL. The caller must
+// hold t.mu for writing. Evicting only fully idle hosts keeps the pointer that
+// active requests already hold valid.
+func (t *Transport) evictIdleLocked() {
+	ttl := t.config.HostIdleTTL
+	for key, hs := range t.hosts {
+		if hs.semaphore.InUse() == 0 &&
+			hs.semaphore.Waiting() == 0 &&
+			!hs.state.IsBlocked() &&
+			hs.state.IsStale(ttl) {
+			delete(t.hosts, key)
+		}
+	}
+}
+
 // updateState updates the host state from response headers using signal handlers.
 func (t *Transport) updateState(host string, hs *hostState, resp *http.Response) {
+	// Record that we heard from this host so stale-state expiry works even for
+	// responses that carry no capacity headers.
+	hs.state.touch()
+
 	// If no handlers configured, nothing to do
 	if len(t.config.SignalHandlers) == 0 {
 		return
@@ -139,33 +253,13 @@ func (t *Transport) updateState(host string, hs *hostState, resp *http.Response)
 
 	// Handle blocking signals (rate limit exceeded, etc.)
 	if action.Block {
-		hs.state.SetBlockedUntil(action.BlockUntil)
+		hs.state.setBlockedUntil(action.BlockUntil)
 	}
 
 	// Update concurrency if suggested
 	if action.AdjustConcurrency {
-		suggested := action.NewConcurrency
-		original := suggested
-		// Always enforce MinConcurrency as absolute floor, even if backend suggests 0
-		// This prevents complete blocking while respecting backend's signal to throttle
-		if suggested < t.config.MinConcurrency {
-			suggested = t.config.MinConcurrency
-		}
-		if suggested > t.config.MaxConcurrency {
-			suggested = t.config.MaxConcurrency
-		}
-
-		current := hs.state.GetCurrentConcurrency()
-		if suggested != current {
-			hs.state.SetCurrentConcurrency(suggested)
-			hs.semaphore.Resize(suggested)
-
-			// Mark as clamped if we adjusted the suggestion
-			hs.state.SetClamped(original != suggested)
-
-			if t.config.OnStateChange != nil {
-				t.config.OnStateChange(host, hs.state.Clone())
-			}
+		if t.adjustConcurrency(hs, action.NewConcurrency) && t.config.OnStateChange != nil {
+			t.config.OnStateChange(host, hs.state.clone())
 		}
 	}
 
@@ -177,26 +271,27 @@ func (t *Transport) updateState(host string, hs *hostState, resp *http.Response)
 		}
 	}
 	if len(headers) > 0 {
-		hs.state.Update(headers)
+		hs.state.update(headers)
 	}
 }
 
 // processSignals aggregates signals into an action.
-func (t *Transport) processSignals(signals []*Signal) *SignalAction {
-	action := &SignalAction{
-		Signals: signals,
-	}
+func (t *Transport) processSignals(signals []*Signal) *signalAction {
+	action := &signalAction{}
 
 	for _, signal := range signals {
-		switch signal.Type {
-		case SignalTypeBlock:
+		// Any signal carrying a block window (Retry-After, rate-limit reset,
+		// explicit block) should pause requests to the host.
+		if !signal.BlockUntil.IsZero() {
 			action.Block = true
 			if signal.BlockUntil.After(action.BlockUntil) {
 				action.BlockUntil = signal.BlockUntil
 			}
-			if signal.RetryAfter > action.RetryAfter {
-				action.RetryAfter = signal.RetryAfter
-			}
+		}
+
+		switch signal.Type {
+		case SignalTypeBlock:
+			action.Block = true
 
 		case SignalTypeRateLimit, SignalTypeBackoff:
 			// Use the most conservative (lowest) suggested concurrency
@@ -205,9 +300,6 @@ func (t *Transport) processSignals(signals []*Signal) *SignalAction {
 					action.AdjustConcurrency = true
 					action.NewConcurrency = signal.SuggestedConcurrency
 				}
-			}
-			if signal.Type == SignalTypeBackoff {
-				action.Backoff = true
 			}
 
 		case SignalTypeCapacity:
@@ -224,17 +316,26 @@ func (t *Transport) processSignals(signals []*Signal) *SignalAction {
 	return action
 }
 
-// addUserAgent adds or appends the configured user agent.
-func (t *Transport) addUserAgent(req *http.Request) {
+// withUserAgent returns a request with the configured User-Agent applied. When a
+// change is required it shallow-copies the request and clones only the header
+// map, honoring the http.RoundTripper contract that the incoming request (and
+// its header map) must not be modified.
+func (t *Transport) withUserAgent(req *http.Request) *http.Request {
 	if t.config.UserAgent == "" {
-		return
+		return req
 	}
-	existing := req.Header.Get("User-Agent")
-	if existing == "" {
-		req.Header.Set("User-Agent", t.config.UserAgent)
-	} else {
-		req.Header.Set("User-Agent", t.config.UserAgent+" "+existing)
+	ua := t.config.UserAgent
+	if existing := req.Header.Get("User-Agent"); existing != "" {
+		ua = t.config.UserAgent + " " + existing
 	}
+	clone := *req
+	header := req.Header.Clone()
+	if header == nil {
+		header = make(http.Header)
+	}
+	clone.Header = header
+	clone.Header.Set("User-Agent", ua)
+	return &clone
 }
 
 // hostKey returns the key used for concurrency grouping.
@@ -246,31 +347,32 @@ func (t *Transport) hostKey(u *url.URL) string {
 	return HostKeyFunc(u)
 }
 
-// GetState returns the current state for a host, or nil if unknown.
-func (t *Transport) GetState(host string) *State {
+// State returns the current state snapshot for a host key, or nil if unknown.
+func (t *Transport) State(host string) *State {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
 	if hs, ok := t.hosts[host]; ok {
-		return hs.state.Clone()
+		return hs.state.clone()
 	}
 	return nil
 }
 
-// GetStats returns statistics for all known hosts.
-func (t *Transport) GetStats() map[string]Stats {
+// Stats returns statistics for all known hosts.
+func (t *Transport) Stats() map[string]Stats {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
 	stats := make(map[string]Stats, len(t.hosts))
 	for host, hs := range t.hosts {
+		snap := hs.state.clone()
 		stats[host] = Stats{
-			CurrentConcurrency: hs.state.GetCurrentConcurrency(),
+			CurrentConcurrency: snap.CurrentConcurrency,
 			InUse:              hs.semaphore.InUse(),
 			Available:          hs.semaphore.Available(),
 			Waiting:            hs.semaphore.Waiting(),
-			Status:             hs.state.Status,
-			LastUpdated:        hs.state.LastUpdated,
+			Status:             snap.Status,
+			LastUpdated:        snap.LastUpdated,
 		}
 	}
 	return stats
@@ -283,7 +385,7 @@ type Stats struct {
 	Available          int
 	Waiting            int
 	Status             Status
-	LastUpdated        interface{}
+	LastUpdated        time.Time
 }
 
 // capacityHeaders is the list of headers to look for in responses.

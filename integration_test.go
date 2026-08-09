@@ -96,7 +96,7 @@ func TestIntegration_BasicRequest(t *testing.T) {
 	}
 
 	// Check state was captured
-	state := client.GetState(url)
+	state := client.State(url)
 	if state != nil {
 		t.Logf("Captured state - Status: %s, Concurrency: %d, Blocked: %v",
 			state.Status, state.CurrentConcurrency, state.IsBlocked())
@@ -111,22 +111,22 @@ func TestIntegration_ConcurrentRequests(t *testing.T) {
 	const numRequests = 10
 	results := make(chan error, numRequests)
 
-	for i := 0; i < numRequests; i++ {
-		go func(n int) {
+	for i := range numRequests {
+		go func() {
 			resp, err := client.Get(url)
 			if err != nil {
 				results <- err
 				return
 			}
 			resp.Body.Close()
-			t.Logf("Request %d completed with status %d", n, resp.StatusCode)
+			t.Logf("Request %d completed with status %d", i, resp.StatusCode)
 			results <- nil
-		}(i)
+		}()
 	}
 
 	// Collect results
 	var errors int
-	for i := 0; i < numRequests; i++ {
+	for range numRequests {
 		if err := <-results; err != nil {
 			t.Logf("Request error: %v", err)
 			errors++
@@ -136,7 +136,7 @@ func TestIntegration_ConcurrentRequests(t *testing.T) {
 	t.Logf("Completed %d/%d requests successfully", numRequests-errors, numRequests)
 
 	// Log final state
-	state := client.GetState(url)
+	state := client.State(url)
 	if state != nil {
 		t.Logf("Final state - Status: %s, Concurrency: %d, Blocked: %v",
 			state.Status, state.CurrentConcurrency, state.IsBlocked())
@@ -145,7 +145,7 @@ func TestIntegration_ConcurrentRequests(t *testing.T) {
 		}
 	}
 
-	stats := client.GetStats()
+	stats := client.Stats()
 	for host, s := range stats {
 		t.Logf("Stats for %s: InUse=%d, Available=%d, Waiting=%d",
 			host, s.InUse, s.Available, s.Waiting)
@@ -157,10 +157,10 @@ func TestIntegration_AdaptiveBehavior(t *testing.T) {
 	client := getTestClient(t)
 
 	// Make requests in waves to observe adaptation
-	for wave := 0; wave < 3; wave++ {
+	for wave := range 3 {
 		t.Logf("Wave %d starting", wave+1)
 
-		for i := 0; i < 5; i++ {
+		for range 5 {
 			resp, err := client.Get(url)
 			if err != nil {
 				t.Logf("Request error: %v", err)
@@ -169,7 +169,7 @@ func TestIntegration_AdaptiveBehavior(t *testing.T) {
 			resp.Body.Close()
 		}
 
-		state := client.GetState(url)
+		state := client.State(url)
 		if state != nil {
 			t.Logf("After wave %d - Concurrency: %d, Status: %s, Blocked: %v",
 				wave+1, state.CurrentConcurrency, state.Status, state.IsBlocked())
@@ -185,8 +185,8 @@ func TestIntegration_RateLimitRecovery(t *testing.T) {
 
 	t.Log("Making requests until rate limited or 20 requests...")
 
-	for i := 0; i < 20; i++ {
-		state := client.GetState(url)
+	for i := range 20 {
+		state := client.State(url)
 		if state != nil && state.IsBlocked() {
 			t.Logf("Request %d: Blocked until %v, waiting...", i, state.BlockedUntil)
 			time.Sleep(time.Until(state.BlockedUntil) + 100*time.Millisecond)
@@ -204,7 +204,7 @@ func TestIntegration_RateLimitRecovery(t *testing.T) {
 		// If we got rate limited, log it
 		if resp.StatusCode == 429 {
 			t.Logf("Rate limited at request %d", i)
-			state := client.GetState(url)
+			state := client.State(url)
 			if state != nil {
 				t.Logf("  Blocked until: %v", state.BlockedUntil)
 			}

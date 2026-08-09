@@ -10,12 +10,19 @@ import (
 type Status string
 
 const (
-	StatusUnknown     Status = ""
-	StatusHealthy     Status = "healthy"
-	StatusBusy        Status = "busy"
-	StatusAtLimit     Status = "at_limit"
-	StatusDegraded    Status = "degraded"
-	StatusScalingUp   Status = "scaling_up"
+	// StatusUnknown means the server has not reported a status.
+	StatusUnknown Status = ""
+	// StatusHealthy means the server is operating normally.
+	StatusHealthy Status = "healthy"
+	// StatusBusy means the server is under load but still serving.
+	StatusBusy Status = "busy"
+	// StatusAtLimit means the server has reached its capacity limit.
+	StatusAtLimit Status = "at_limit"
+	// StatusDegraded means the server is overloaded and shedding load.
+	StatusDegraded Status = "degraded"
+	// StatusScalingUp means the server is adding capacity.
+	StatusScalingUp Status = "scaling_up"
+	// StatusScalingDown means the server is removing capacity.
 	StatusScalingDown Status = "scaling_down"
 )
 
@@ -24,7 +31,10 @@ func (s Status) IsHealthy() bool {
 	return s == StatusHealthy || s == StatusScalingUp || s == StatusScalingDown
 }
 
-// State represents the capacity state for a single host.
+// State is a point-in-time snapshot of the capacity state for a single host.
+// It is what the Client.State and Client.Stats accessors and the OnStateChange
+// callback expose. Fields are safe to read directly; the transport owns and
+// mutates the live state internally.
 type State struct {
 	mu sync.RWMutex
 
@@ -35,7 +45,7 @@ type State struct {
 	TasksPending          int
 	ClusterMaxConcurrency int
 	SuggestedConcurrency  int
-	StateAge              int // seconds, -1 if unknown
+	StateAge              int // seconds since the server computed this state
 
 	// Server-reported worker metrics
 	WorkerActive     int
@@ -56,8 +66,8 @@ type State struct {
 	Clamped bool
 }
 
-// NewState creates a new state with initial concurrency.
-func NewState(initialConcurrency int) *State {
+// newState creates a new state with initial concurrency.
+func newState(initialConcurrency int) *State {
 	return &State{
 		Status:             StatusUnknown,
 		CurrentConcurrency: initialConcurrency,
@@ -65,8 +75,8 @@ func NewState(initialConcurrency int) *State {
 	}
 }
 
-// Update updates the state from response headers.
-func (s *State) Update(headers map[string]string) {
+// update updates the state from response headers.
+func (s *State) update(headers map[string]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -119,77 +129,57 @@ func (s *State) Update(headers map[string]string) {
 	s.LastUpdated = time.Now()
 }
 
-// GetSuggestedConcurrency returns the server's suggested concurrency,
-// clamped to the provided min/max bounds.
-func (s *State) GetSuggestedConcurrency(min, max int) int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	suggested := s.SuggestedConcurrency
-	if suggested <= 0 {
-		suggested = s.CurrentConcurrency
-	}
-
-	if suggested < min {
-		return min
-	}
-	if suggested > max {
-		return max
-	}
-	return suggested
-}
-
-// SetCurrentConcurrency updates the current concurrency limit.
-func (s *State) SetCurrentConcurrency(n int) {
+// setCurrentConcurrency updates the current concurrency limit.
+func (s *State) setCurrentConcurrency(n int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.CurrentConcurrency = n
 }
 
-// SetClamped sets whether the concurrency was clamped by config limits.
-func (s *State) SetClamped(clamped bool) {
+// setClamped sets whether the concurrency was clamped by config limits.
+func (s *State) setClamped(clamped bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Clamped = clamped
 }
 
-// GetCurrentConcurrency returns the current concurrency limit.
-func (s *State) GetCurrentConcurrency() int {
+// getCurrentConcurrency returns the current concurrency limit.
+func (s *State) getCurrentConcurrency() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.CurrentConcurrency
 }
 
-// SetBlockedUntil sets when the host should be unblocked.
-func (s *State) SetBlockedUntil(t time.Time) {
+// setBlockedUntil sets when the host should be unblocked.
+func (s *State) setBlockedUntil(t time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.BlockedUntil = t
 }
 
-// IsBlocked returns true if the host is currently blocked.
+// touch records that the host was just observed, refreshing LastUpdated.
+func (s *State) touch() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.LastUpdated = time.Now()
+}
+
+// IsBlocked reports whether the host is within a server-signalled block window.
 func (s *State) IsBlocked() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return time.Now().Before(s.BlockedUntil)
 }
 
-// GetBlockedUntil returns when the block expires.
-func (s *State) GetBlockedUntil() time.Time {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.BlockedUntil
-}
-
-// IsStale returns true if the state hasn't been updated recently.
+// IsStale reports whether the state has not been updated within expiry.
 func (s *State) IsStale(expiry time.Duration) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return time.Since(s.LastUpdated) > expiry
 }
 
-// Clone returns a copy of the current state.
-func (s *State) Clone() *State {
+// clone returns a snapshot copy of the current state.
+func (s *State) clone() *State {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 

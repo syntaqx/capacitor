@@ -1,9 +1,10 @@
 package capacitor
 
 import (
+	"cmp"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"time"
 )
 
@@ -64,16 +65,18 @@ func (b *Builder) WithUserAgent(ua string) *Builder {
 	return b
 }
 
-// WithConcurrency sets the initial, min, and max concurrency limits.
-func (b *Builder) WithConcurrency(initial, min, max int) *Builder {
+// WithConcurrency sets the initial, minimum, and maximum concurrency limits.
+func (b *Builder) WithConcurrency(initial, minimum, maximum int) *Builder {
 	b.config.InitialConcurrency = initial
-	b.config.MinConcurrency = min
-	b.config.MaxConcurrency = max
+	b.config.MinConcurrency = minimum
+	b.config.MaxConcurrency = maximum
 	return b
 }
 
-// WithTimeout sets how long to wait for a concurrency slot.
-func (b *Builder) WithTimeout(timeout time.Duration) *Builder {
+// WithAcquireTimeout sets how long to wait for a concurrency slot before a
+// request fails with a *CapacityError. This is distinct from the wrapped
+// http.Client's request timeout.
+func (b *Builder) WithAcquireTimeout(timeout time.Duration) *Builder {
 	b.config.AcquireTimeout = timeout
 	return b
 }
@@ -101,6 +104,23 @@ func (b *Builder) OnSignal(fn func(host string, signal *Signal)) *Builder {
 //	    Build()
 func (b *Builder) WithKeyFunc(fn func(u *url.URL) string) *Builder {
 	b.config.KeyFunc = fn
+	return b
+}
+
+// WithMaxTrackedHosts bounds the number of per-host pools kept in memory.
+// Once the limit is reached, idle hosts (no in-flight or queued requests, not
+// blocked, unused beyond the idle TTL) are evicted to make room. Pass 0 for
+// unlimited. Useful for long-running clients that touch many distinct hosts,
+// such as web crawlers.
+func (b *Builder) WithMaxTrackedHosts(n int) *Builder {
+	b.config.MaxTrackedHosts = n
+	return b
+}
+
+// WithHostIdleTTL sets how long a host must be idle before it can be evicted
+// once MaxTrackedHosts is reached. Only takes effect when MaxTrackedHosts > 0.
+func (b *Builder) WithHostIdleTTL(d time.Duration) *Builder {
+	b.config.HostIdleTTL = d
 	return b
 }
 
@@ -164,9 +184,9 @@ func (b *Builder) WithAll() *Builder {
 
 // Build creates the configured HTTP client.
 func (b *Builder) Build() *Client {
-	// Sort handlers by priority
-	sort.Slice(b.handlers, func(i, j int) bool {
-		return b.handlers[i].Priority() < b.handlers[j].Priority()
+	// Sort handlers by priority, preserving registration order for ties.
+	slices.SortStableFunc(b.handlers, func(a, c SignalHandler) int {
+		return cmp.Compare(a.Priority(), c.Priority())
 	})
 
 	b.config.SignalHandlers = b.handlers
@@ -194,8 +214,8 @@ func (b *Builder) Build() *Client {
 // Transport returns just the transport layer.
 // Useful if you need to construct the http.Client yourself.
 func (b *Builder) Transport() *Transport {
-	sort.Slice(b.handlers, func(i, j int) bool {
-		return b.handlers[i].Priority() < b.handlers[j].Priority()
+	slices.SortStableFunc(b.handlers, func(a, c SignalHandler) int {
+		return cmp.Compare(a.Priority(), c.Priority())
 	})
 
 	b.config.SignalHandlers = b.handlers

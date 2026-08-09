@@ -35,7 +35,7 @@ func TestClient_Basic(t *testing.T) {
 	}
 
 	// Check state was updated
-	state := client.GetState(server.URL)
+	state := client.State(server.URL)
 	if state == nil {
 		t.Fatal("expected state to be set")
 	}
@@ -80,7 +80,7 @@ func TestClient_ConcurrencyLimit(t *testing.T) {
 
 	// Make many concurrent requests
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -94,9 +94,9 @@ func TestClient_ConcurrencyLimit(t *testing.T) {
 	}
 	wg.Wait()
 
-	max := atomic.LoadInt64(&maxConcurrent)
-	if max > 5 {
-		t.Errorf("expected max concurrent <= 5, got %d", max)
+	peak := atomic.LoadInt64(&maxConcurrent)
+	if peak > 5 {
+		t.Errorf("expected max concurrent <= 5, got %d", peak)
 	}
 }
 
@@ -132,23 +132,23 @@ func TestClient_DynamicConcurrencyAdjustment(t *testing.T) {
 		Build()
 
 	// First batch at high concurrency
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		resp, _ := client.Get(server.URL)
 		resp.Body.Close()
 	}
 
-	state := client.GetState(server.URL)
+	state := client.State(server.URL)
 	if state.CurrentConcurrency != 100 {
 		t.Errorf("expected concurrency 100, got %d", state.CurrentConcurrency)
 	}
 
 	// Next requests should reduce concurrency
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		resp, _ := client.Get(server.URL)
 		resp.Body.Close()
 	}
 
-	state = client.GetState(server.URL)
+	state = client.State(server.URL)
 	if state.CurrentConcurrency != 2 {
 		t.Errorf("expected concurrency 2, got %d", state.CurrentConcurrency)
 	}
@@ -223,7 +223,7 @@ func TestClient_WrapExisting(t *testing.T) {
 	}
 
 	// Verify capacity tracking works
-	state := client.GetState(server.URL)
+	state := client.State(server.URL)
 	if state == nil || state.SuggestedConcurrency != 25 {
 		t.Error("expected state to be tracked")
 	}
@@ -294,13 +294,13 @@ func TestTransport_MultipleHosts(t *testing.T) {
 	resp2.Body.Close()
 
 	// Check states are separate
-	stats := client.GetStats()
+	stats := client.Stats()
 	if len(stats) != 2 {
 		t.Errorf("expected 2 hosts, got %d", len(stats))
 	}
 
-	state1 := client.GetState(server1.URL)
-	state2 := client.GetState(server2.URL)
+	state1 := client.State(server1.URL)
+	state2 := client.State(server2.URL)
 
 	if state1.Status != capacitor.StatusHealthy {
 		t.Errorf("expected server1 healthy, got %s", state1.Status)
