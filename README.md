@@ -80,8 +80,7 @@ client := capacitor.Wrap(nil).
 | `WithHTTPStatusHandling()` | 429, 503, 420 status codes + Retry-After header                                                                      |
 | `WithCapacityHeaders()`    | `X-Capacity-*` application-level headers                                                                             |
 | `WithGOAWAY()`             | HTTP/2 GOAWAY frame handling                                                                                         |
-| `WithDefaults()`           | `WithHTTPStatusHandling()` + `WithRateLimitHeaders()`                                                                |
-| `WithAll()`                | All built-in handlers                                                                                                |
+| `WithDefaults()`           | All built-in handlers                                                                                                |
 | `WithHandler(h)`           | Add a custom `SignalHandler` implementation                                                                          |
 
 ### No Handlers = Passthrough

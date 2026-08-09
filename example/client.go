@@ -147,7 +147,7 @@ func requestFuncs(cfg demoConfig) (func() (int, http.Header, error), func() int)
 	client := capacitor.Wrap(base).
 		WithUserAgent("capacitor-demo/1.0").
 		WithConcurrency(cfg.initial, 1, cfg.maxConc).
-		WithAll().
+		WithDefaults().
 		Build()
 
 	do := func() (int, http.Header, error) {

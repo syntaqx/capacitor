@@ -161,16 +161,8 @@ func (b *Builder) WithGOAWAY() *Builder {
 	return b
 }
 
-// WithDefaults enables the most common handlers:
-// HTTP status codes (429, 503) and rate limit headers.
+// WithDefaults enables all built-in signal handlers.
 func (b *Builder) WithDefaults() *Builder {
-	return b.
-		WithHTTPStatusHandling().
-		WithRateLimitHeaders()
-}
-
-// WithAll enables all built-in signal handlers.
-func (b *Builder) WithAll() *Builder {
 	return b.
 		WithHTTPStatusHandling().
 		WithRateLimitHeaders().

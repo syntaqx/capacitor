@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-09
+
 Initial release of capacitor, an adaptive HTTP client for Go that adjusts
 per-host concurrency based on server capacity and rate-limit signals.
 
@@ -14,7 +16,7 @@ per-host concurrency based on server capacity and rate-limit signals.
 
 - `Wrap(client)` builder with opt-in signal handlers: `WithRateLimitHeaders`,
   `WithHTTPStatusHandling`, `WithCapacityHeaders`, `WithGOAWAY`, `WithDefaults`,
-  `WithAll`, and `WithHandler` for custom `SignalHandler` implementations.
+  and `WithHandler` for custom `SignalHandler` implementations.
 - Adaptive per-host concurrency driven by:
   - Rate-limit headers (`X-RateLimit-*`, `RateLimit-*`, `CF-RateLimit-*`).
   - HTTP status codes (429, 503, 420) and `Retry-After`.
@@ -33,4 +35,5 @@ per-host concurrency based on server capacity and rate-limit signals.
 - `Config`/`NewClient` for explicit, programmatic configuration.
 - Zero external dependencies (standard library only).
 
-[Unreleased]: https://github.com/syntaqx/capacitor/commits/main
+[Unreleased]: https://github.com/syntaqx/capacitor/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/syntaqx/capacitor/releases/tag/v0.1.0

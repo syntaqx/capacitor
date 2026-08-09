@@ -48,7 +48,7 @@ func getTestClient(t *testing.T) *capacitor.Client {
 	// Wrap it with capacitor and add handlers
 	return capacitor.Wrap(baseClient).
 		WithConcurrency(10, 1, 50).
-		WithDefaults(). // HTTP status codes + rate limit headers
+		WithDefaults(). // all built-in signal handlers
 		OnSignal(func(host string, signal *capacitor.Signal) {
 			t.Logf("Signal from %s [%s]: type=%s, remaining=%d, limit=%d, message=%s",
 				host, signal.Source, signal.Type, signal.Remaining, signal.Limit, signal.Message)
