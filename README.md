@@ -1,7 +1,6 @@
 # Capacitor
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/syntaqx/capacitor.svg)](https://pkg.go.dev/github.com/syntaqx/capacitor)
-[![Go Report Card](https://goreportcard.com/badge/github.com/syntaqx/capacitor)](https://goreportcard.com/report/github.com/syntaqx/capacitor)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![codecov](https://codecov.io/gh/syntaqx/capacitor/graph/badge.svg?token=b0Z8TQKrJJ)](https://codecov.io/gh/syntaqx/capacitor)
 
