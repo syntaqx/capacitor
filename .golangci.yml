@@ -25,6 +25,13 @@ linters:
     # Security
     - gosec
 
+  settings:
+    gosec:
+      excludes:
+        # G704: SSRF taint analysis — this is a general-purpose HTTP client
+        # that intentionally sends requests to caller-provided URLs.
+        - G704
+
   exclusions:
     presets:
       - std-error-handling
