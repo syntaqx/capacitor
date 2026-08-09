@@ -330,6 +330,37 @@ func TestTransport_EvictsIdleHosts(t *testing.T) {
 	}
 }
 
+// TestTransport_ConcurrentNewHost exercises the double-checked locking path in
+// getOrCreateHostState: many goroutines race to create the same host entry
+// simultaneously, so the second writer hits the already-exists branch.
+func TestTransport_ConcurrentNewHost(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := capacitor.Wrap(nil).Build()
+
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := client.Get(server.URL)
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+			resp.Body.Close()
+		}()
+	}
+	wg.Wait()
+
+	if got := len(client.Stats()); got != 1 {
+		t.Fatalf("expected exactly 1 host pool, got %d", got)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
