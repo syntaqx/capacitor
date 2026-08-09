@@ -178,7 +178,6 @@ if errors.Is(err, capacitor.ErrBlocked) {
 `capacitor.IsCapacityError(err)` unwraps the `*url.Error` that `http.Client`
 adds, so it works on errors returned directly from `Get`/`Do`.
 
-
 ## Server Implementation
 
 For servers to participate in capacity signaling, they need to return the appropriate headers.
